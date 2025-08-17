@@ -357,7 +357,7 @@ END
 --To script the data in system tables, just create a view on the system tables and script the view instead
 IF @schema IS NULL
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM sys.tables t WHERE t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT AND t.schema_id = SCHEMA_ID())
+  IF NOT EXISTS (SELECT 1 FROM sys.objects t WHERE t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT AND t.schema_id = SCHEMA_ID())
   BEGIN
     RAISERROR('User table or view not found.',16,1)
     PRINT 'You may see this error if the specified table is not in your default schema (' + SCHEMA_NAME() + '). In that case use @schema parameter to specify the schema name.'
@@ -367,7 +367,7 @@ BEGIN
 END
 ELSE
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM sys.tables t WHERE t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT AND t.schema_id = SCHEMA_ID(@schema COLLATE DATABASE_DEFAULT))
+  IF NOT EXISTS (SELECT 1 FROM sys.objects t WHERE t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT AND t.schema_id = SCHEMA_ID(@schema COLLATE DATABASE_DEFAULT))
   BEGIN
     RAISERROR('User table or view not found.',16,1)
     PRINT 'Make sure you have SELECT permission on that table or view.'
@@ -467,7 +467,7 @@ BEGIN
   SET @sql =
     'SELECT @columnname = c.name
     FROM ' + COALESCE(PARSENAME(@target_table COLLATE DATABASE_DEFAULT,3),QUOTENAME(DB_NAME())) + '.sys.columns c
-    INNER JOIN ' + COALESCE(PARSENAME(@target_table COLLATE DATABASE_DEFAULT,3),QUOTENAME(DB_NAME())) + '.sys.tables t ON c.object_id = t.object_id
+    INNER JOIN ' + COALESCE(PARSENAME(@target_table COLLATE DATABASE_DEFAULT,3),QUOTENAME(DB_NAME())) + '.sys.objects t ON c.object_id = t.object_id
     INNER JOIN ' + COALESCE(PARSENAME(@target_table COLLATE DATABASE_DEFAULT,3),QUOTENAME(DB_NAME())) + '.sys.schemas s ON s.schema_id = t.schema_id
     WHERE t.[name] = ''' + PARSENAME(@target_table COLLATE DATABASE_DEFAULT,1) + '''' + '
     AND s.[name] = ''' + COALESCE(PARSENAME(@target_table COLLATE DATABASE_DEFAULT,2), @schema COLLATE DATABASE_DEFAULT, SCHEMA_NAME()) + '''' + '
@@ -531,7 +531,7 @@ SELECT @Source_Table_Object_Id = OBJECT_ID(@Source_Table_Qualified)
 --To get the first column's ID
 SELECT @Column_ID = MIN(c.column_id) 
 FROM sys.columns c 
-INNER JOIN sys.tables t ON c.object_id = t.object_id
+INNER JOIN sys.objects t ON c.object_id = t.object_id
 WHERE t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT
 AND t.schema_id = COALESCE(SCHEMA_ID(@schema COLLATE DATABASE_DEFAULT), SCHEMA_ID())
 
@@ -542,7 +542,7 @@ BEGIN
          @Column_Name_Unquoted = c.name,
          @Data_Type = COALESCE(bt.name, tp.name)
   FROM sys.columns c
-  INNER JOIN sys.tables t ON c.object_id = t.object_id
+  INNER JOIN sys.objects t ON c.object_id = t.object_id
   INNER JOIN sys.types tp ON c.user_type_id = tp.user_type_id
   LEFT JOIN sys.types bt ON tp.system_type_id = bt.user_type_id AND tp.system_type_id = bt.system_type_id
   WHERE c.column_id = @Column_ID
@@ -685,7 +685,7 @@ BEGIN
 
   SET @Column_ID = (SELECT MIN(c.column_id)
                     FROM sys.columns c
-                    INNER JOIN sys.tables t ON c.object_id = t.object_id
+                    INNER JOIN sys.objects t ON c.object_id = t.object_id
                     WHERE t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT
                       AND t.schema_id = COALESCE(SCHEMA_ID(@schema COLLATE DATABASE_DEFAULT), SCHEMA_ID())
                       AND c.column_id > @Column_ID)
@@ -779,7 +779,7 @@ BEGIN
          @PK_column_joins = @PK_column_joins + '([Target].[' + c.name + '] = [Source].[' + c.name + ']' + 
                             CASE WHEN c.is_nullable = 1 THEN ' OR ([Target].[' + c.name + '] IS NULL AND [Source].[' + c.name + '] IS NULL)' ELSE '' END + ') AND '
   FROM sys.columns c
-  INNER JOIN sys.tables t ON c.object_id = t.object_id
+  INNER JOIN sys.objects t ON c.object_id = t.object_id
   WHERE @cols_to_join_on LIKE '%''' + c.name + '''%' COLLATE DATABASE_DEFAULT
     AND t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT
     AND t.schema_id = COALESCE(SCHEMA_ID(@schema COLLATE DATABASE_DEFAULT), SCHEMA_ID())
