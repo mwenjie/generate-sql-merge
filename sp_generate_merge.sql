@@ -72,7 +72,15 @@ CREATE PROC [sp_generate_merge]
  @max_rows_per_batch int = NULL, -- When not NULL, splits the MERGE command into multiple batches, each batch merges X rows as specified
  @quiet bit = 0, -- When 1, this proc will not print informational messages and warnings
  @execute bit = 0, -- When 1, the generated MERGE will be executed by this proc. Note: The @batch_separator param must be set to NULL when @execute=1
- @serializable bit = 1 -- When 1, the generated MERGE will include the WITH (SERIALIZABLE) table hint
+ @serializable bit = 1, -- When 1, the generated MERGE will include the WITH (SERIALIZABLE) table hint
+ @scd_type tinyint = 0, -- 0: disabled (current behavior), 1: SCD Type 1, 2: SCD Type 2
+ @asof_expression nvarchar(128) = N'SYSUTCDATETIME()', -- expression evaluated in generated SQL for effective/expiry timestamps
+ @meta_current sysname = N'META_CURRENT_RECORD_INDICATOR', -- name of current record indicator column
+ @meta_effective sysname = N'META_EFFECTIVE_DATETIME', -- name of effective datetime column
+ @meta_expiry sysname = N'META_EXPIRY_DATETIME', -- name of expiry datetime column
+ @meta_key_checksum sysname = N'META_KEY_CHECKSUM', -- name of key checksum column
+ @meta_record_checksum sysname = N'META_RECORD_CHECKSUM', -- name of record checksum column
+ @meta_source sysname = N'META_SOURCE' -- name of source column
 )
 AS
 BEGIN
@@ -409,6 +417,25 @@ BEGIN
   SET @exclude_generated_always_columns = @ommit_generated_always_cols
 END
 
+-- SCD parameter validation
+IF @scd_type NOT IN (0, 1, 2)
+BEGIN
+  RAISERROR('Invalid @scd_type value. Must be 0 (disabled), 1 (SCD Type 1), or 2 (SCD Type 2).', 16, 1)
+  RETURN -1 --Failure. Reason: Invalid SCD type specified
+END
+
+IF @scd_type > 0 AND @hash_compare_column IS NOT NULL
+BEGIN
+  RAISERROR('Cannot use @hash_compare_column when @scd_type is enabled. SCD mode uses META_RECORD_CHECKSUM for change detection.', 16, 1)
+  RETURN -1 --Failure. Reason: Conflicting change detection methods
+END
+
+IF @scd_type = 2 AND @delete_if_not_matched = 1
+BEGIN
+  RAISERROR('Cannot use @delete_if_not_matched=1 with SCD Type 2. SCD Type 2 expires records instead of deleting.', 16, 1)
+  RETURN -1 --Failure. Reason: SCD Type 2 does not support deletion
+END
+
 --Variable declarations
 DECLARE @Column_ID int, 
  @Column_List nvarchar(max), 
@@ -429,7 +456,10 @@ DECLARE @Column_ID int,
  @sql nvarchar(max),  --SQL statement that will be executed to check existence of [Hashvalue] column in case @hash_compare_column is used
  @checkhashcolumn nvarchar(128),
  @SourceHashColumn bit = 0,
- @b char(1) = char(13)
+ @b char(1) = char(13),
+ @PK_column_list_for_key_checksum nvarchar(max), -- For computing META_KEY_CHECKSUM from business keys
+ @Business_Column_List nvarchar(max), -- Business columns only (excluding META*)
+ @Business_Column_List_Insert_Values nvarchar(max) -- Business column insert values
 
 IF @hash_compare_column IS NOT NULL  --Check existence of column [Hashvalue] in target table and raise error in case of missing
 BEGIN
@@ -518,6 +548,10 @@ BEGIN
   WHERE c.column_id = @Column_ID
     AND t.name = @Internal_Table_Name COLLATE DATABASE_DEFAULT
     AND t.schema_id = COALESCE(SCHEMA_ID(@schema COLLATE DATABASE_DEFAULT), SCHEMA_ID())
+
+  --For SCD mode, exclude META* columns from normal processing as they are handled separately
+  IF @scd_type > 0 AND @Column_Name_Unquoted IN (@meta_current, @meta_effective, @meta_expiry, @meta_key_checksum, @meta_record_checksum, @meta_source)
+    GOTO SKIP_LOOP
 
   --Timestamp/Rowversion columns can't be inserted/updated due to SQL Server limitations, so exclude them
   IF @Data_Type COLLATE DATABASE_DEFAULT IN ('timestamp','rowversion')
@@ -686,6 +720,42 @@ BEGIN
   SET @Column_List_For_HashCompare = LEFT(@Column_List_For_HashCompare,LEN(@Column_List_For_HashCompare) - 1)
 END
 
+--Capture business data columns before adding META* columns for SCD
+IF @scd_type > 0
+BEGIN
+  SET @Business_Column_List = @Column_List
+  SET @Business_Column_List_Insert_Values = @Column_List_Insert_Values
+END
+
+--Add META* columns for SCD functionality
+IF @scd_type > 0
+BEGIN
+  --Add META* columns to column lists
+  SET @Column_List += ',' + QUOTENAME(@meta_current) + ',' + QUOTENAME(@meta_effective) + ',' + QUOTENAME(@meta_expiry) + ',' + QUOTENAME(@meta_key_checksum) + ',' + QUOTENAME(@meta_record_checksum) + ',' + QUOTENAME(@meta_source)
+  
+  --Add META* columns to insert values (these will be computed in the MERGE)
+  SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_current) + ',[Source].' + QUOTENAME(@meta_effective) + ',[Source].' + QUOTENAME(@meta_expiry) + ',[Source].' + QUOTENAME(@meta_key_checksum) + ',[Source].' + QUOTENAME(@meta_record_checksum) + ',[Source].' + QUOTENAME(@meta_source)
+  
+  --For SCD updates, we modify the update logic
+  IF @scd_type = 1
+  BEGIN
+    --SCD Type 1: Update business data + META columns (full update - preserve existing business data updates)
+    IF LEN(@Column_List_For_Update) > 0
+    BEGIN
+      SET @Column_List_For_Update = @Column_List_For_Update + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_effective) + ' = @asof,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_key_checksum) + ' = [Source].' + QUOTENAME(@meta_key_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_record_checksum) + ' = [Source].' + QUOTENAME(@meta_record_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_source) + ' = [Source].' + QUOTENAME(@meta_source)
+    END
+    ELSE
+    BEGIN
+      SET @Column_List_For_Update = @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_effective) + ' = @asof,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_key_checksum) + ' = [Source].' + QUOTENAME(@meta_key_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_record_checksum) + ' = [Source].' + QUOTENAME(@meta_record_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_source) + ' = [Source].' + QUOTENAME(@meta_source)
+    END
+  END
+  ELSE IF @scd_type = 2
+  BEGIN
+    --SCD Type 2: Only update expiry date for expired records (current indicator set to 0)
+    SET @Column_List_For_Update = @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_current) + ' = 0,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_expiry) + ' = @asof'
+  END
+END
+
 --Get the join columns ----------------------------------------------------------
 DECLARE @PK_column_list NVARCHAR(max)
 DECLARE @PK_column_joins NVARCHAR(max)
@@ -723,6 +793,13 @@ END
 
 SET @PK_column_list = LEFT(@PK_column_list, LEN(@PK_column_list) -1)
 SET @PK_column_joins = LEFT(@PK_column_joins, LEN(@PK_column_joins) -4)
+
+--Capture primary key columns for META_KEY_CHECKSUM computation in SCD mode
+IF @scd_type > 0
+BEGIN
+  -- Use the same format as @Column_List_For_HashCompare for consistent processing
+  SET @PK_column_list_for_key_checksum = @PK_column_list
+END
 
 
 --Forming the final string that will be executed, to output the a MERGE statement
@@ -773,6 +850,13 @@ END
 IF @include_rowsaffected = 1 -- If the caller has elected not to include the "rows affected" section, let MERGE output the row count as it is executed.
 BEGIN
   SET @output += @b COLLATE DATABASE_DEFAULT + 'SET NOCOUNT ON'
+  SET @output += @b COLLATE DATABASE_DEFAULT + ''
+END
+
+--Add @asof declaration for SCD functionality
+IF @scd_type > 0
+BEGIN
+  SET @output += @b COLLATE DATABASE_DEFAULT + 'DECLARE @asof datetime2(7) = ' + @asof_expression + ';'
   SET @output += @b COLLATE DATABASE_DEFAULT + ''
 END
 
@@ -917,7 +1001,33 @@ BEGIN
 END
 ELSE
 BEGIN
-  IF @hash_compare_column IS NULL
+  IF @scd_type > 0
+  BEGIN
+    --For SCD mode, generate computed META* columns in the USING clause
+    IF @top IS NULL OR @top < 0
+    BEGIN
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT ' + @Business_Column_List + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1 AS ' + QUOTENAME(@meta_current) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  @asof AS ' + QUOTENAME(@meta_effective) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)) AS ' + QUOTENAME(@meta_expiry) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_key_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_record_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source) + ' AS ' + QUOTENAME(@meta_source)
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
+    END
+    ELSE  --add 'TOP'-clause
+    BEGIN
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT TOP ' + LTRIM(@top) + ' ' + @Business_Column_List + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1 AS ' + QUOTENAME(@meta_current) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  @asof AS ' + QUOTENAME(@meta_effective) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)) AS ' + QUOTENAME(@meta_expiry) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_key_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_record_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source) + ' AS ' + QUOTENAME(@meta_source)
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
+    END
+  END
+  ELSE IF @hash_compare_column IS NULL
   BEGIN
     IF @top IS NULL OR @top < 0
     BEGIN
@@ -955,15 +1065,27 @@ BEGIN
     SET @Column_List_For_Update += ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@hash_compare_column COLLATE DATABASE_DEFAULT) +' = [Source].' + QUOTENAME(@hash_compare_column COLLATE DATABASE_DEFAULT)
     SET @Column_List += ',' + QUOTENAME(@hash_compare_column COLLATE DATABASE_DEFAULT)
   END
-  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHEN MATCHED ' +
-    CASE WHEN @update_only_if_changed = 1 AND @hash_compare_column IS NOT NULL THEN 
-      'AND ([Target].' + QUOTENAME(@hash_compare_column) +' <> [Source].' + QUOTENAME(@hash_compare_column) + ' OR [Target].' + QUOTENAME(@hash_compare_column) + ' IS NULL) '
-    ELSE 
-      CASE WHEN @update_only_if_changed = 1 AND @hash_compare_column IS NULL THEN 
-        'AND EXISTS (SELECT ' +  @Column_List_For_Check 
-        + @b COLLATE DATABASE_DEFAULT + '                 EXCEPT  SELECT ' + REPLACE(@Column_List_For_Check COLLATE DATABASE_DEFAULT, '[Source].','[Target].') + ') '
-      ELSE '' END 
-    END + 'THEN' 
+  
+  --SCD-specific WHEN MATCHED logic
+  IF @scd_type > 0
+  BEGIN
+    --For SCD, use META_RECORD_CHECKSUM for change detection
+    SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHEN MATCHED AND [Target].' + QUOTENAME(@meta_current) + ' = 1 AND ([Target].' + QUOTENAME(@meta_record_checksum) + ' <> [Source].' + QUOTENAME(@meta_record_checksum) + ') THEN'
+  END
+  ELSE
+  BEGIN
+    --Original logic for non-SCD mode
+    SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHEN MATCHED ' +
+      CASE WHEN @update_only_if_changed = 1 AND @hash_compare_column IS NOT NULL THEN 
+        'AND ([Target].' + QUOTENAME(@hash_compare_column) +' <> [Source].' + QUOTENAME(@hash_compare_column) + ' OR [Target].' + QUOTENAME(@hash_compare_column) + ' IS NULL) '
+      ELSE 
+        CASE WHEN @update_only_if_changed = 1 AND @hash_compare_column IS NULL THEN 
+          'AND EXISTS (SELECT ' +  @Column_List_For_Check 
+          + @b COLLATE DATABASE_DEFAULT + '                 EXCEPT  SELECT ' + REPLACE(@Column_List_For_Check COLLATE DATABASE_DEFAULT, '[Source].','[Target].') + ') '
+        ELSE '' END 
+      END + 'THEN'
+  END
+  
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' UPDATE SET'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + LTRIM(@Column_List_For_Update COLLATE DATABASE_DEFAULT)
 END
@@ -986,6 +1108,25 @@ BEGIN
  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'OUTPUT $action INTO ' + @Merge_Output_Var_Name
 END
 SET @outputMergeBatch += ';' + @b COLLATE DATABASE_DEFAULT
+
+--SCD Type 2: Add follow-up INSERT for new versions of changed records
+IF @scd_type = 2
+BEGIN
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + @b COLLATE DATABASE_DEFAULT + '--SCD Type 2: Insert new records for changed data'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'INSERT INTO ' + @Target_Table_For_Output COLLATE DATABASE_DEFAULT + ' (' + @Column_List COLLATE DATABASE_DEFAULT + ')'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'SELECT ' + @Business_Column_List_Insert_Values + ','
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1, @asof, CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source)
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ' s'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHERE EXISTS ('
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  SELECT 1 FROM ' + @Target_Table_For_Output + ' t'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  WHERE ' + REPLACE(REPLACE(@PK_column_joins, '[Target].', 't.'), '[Source].', 's.')
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_current) + ' = 0'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_expiry) + ' = @asof'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ');' + @b COLLATE DATABASE_DEFAULT
+END
 
 
 IF @include_values = 1 AND @ValuesListTotalCount <> 0 -- Ensure that rows were returned, otherwise the MERGE statement will get nullified.
