@@ -736,11 +736,18 @@ BEGIN
   --Add META* columns to insert values (these will be computed in the MERGE)
   SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_current) + ',[Source].' + QUOTENAME(@meta_effective) + ',[Source].' + QUOTENAME(@meta_expiry) + ',[Source].' + QUOTENAME(@meta_key_checksum) + ',[Source].' + QUOTENAME(@meta_record_checksum) + ',[Source].' + QUOTENAME(@meta_source)
   
-  --For SCD updates, we only update the META columns, not the business data columns
+  --For SCD updates, we modify the update logic
   IF @scd_type = 1
   BEGIN
-    --SCD Type 1: Update effective date, key checksum, record checksum, and source
-    SET @Column_List_For_Update = @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_effective) + ' = @asof,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_key_checksum) + ' = [Source].' + QUOTENAME(@meta_key_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_record_checksum) + ' = [Source].' + QUOTENAME(@meta_record_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_source) + ' = [Source].' + QUOTENAME(@meta_source)
+    --SCD Type 1: Update business data + META columns (full update - preserve existing business data updates)
+    IF LEN(@Column_List_For_Update) > 0
+    BEGIN
+      SET @Column_List_For_Update = @Column_List_For_Update + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_effective) + ' = @asof,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_key_checksum) + ' = [Source].' + QUOTENAME(@meta_key_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_record_checksum) + ' = [Source].' + QUOTENAME(@meta_record_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_source) + ' = [Source].' + QUOTENAME(@meta_source)
+    END
+    ELSE
+    BEGIN
+      SET @Column_List_For_Update = @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_effective) + ' = @asof,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_key_checksum) + ' = [Source].' + QUOTENAME(@meta_key_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_record_checksum) + ' = [Source].' + QUOTENAME(@meta_record_checksum) + ',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_source) + ' = [Source].' + QUOTENAME(@meta_source)
+    END
   END
   ELSE IF @scd_type = 2
   BEGIN
@@ -1101,6 +1108,25 @@ BEGIN
  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'OUTPUT $action INTO ' + @Merge_Output_Var_Name
 END
 SET @outputMergeBatch += ';' + @b COLLATE DATABASE_DEFAULT
+
+--SCD Type 2: Add follow-up INSERT for new versions of changed records
+IF @scd_type = 2
+BEGIN
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + @b COLLATE DATABASE_DEFAULT + '--SCD Type 2: Insert new records for changed data'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'INSERT INTO ' + @Target_Table_For_Output COLLATE DATABASE_DEFAULT + ' (' + @Column_List COLLATE DATABASE_DEFAULT + ')'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'SELECT ' + @Business_Column_List_Insert_Values + ','
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1, @asof, CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source)
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ' s'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHERE EXISTS ('
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  SELECT 1 FROM ' + @Target_Table_For_Output + ' t'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  WHERE ' + REPLACE(REPLACE(@PK_column_joins, '[Target].', 't.'), '[Source].', 's.')
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_current) + ' = 0'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_expiry) + ' = @asof'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ');' + @b COLLATE DATABASE_DEFAULT
+END
 
 
 IF @include_values = 1 AND @ValuesListTotalCount <> 0 -- Ensure that rows were returned, otherwise the MERGE statement will get nullified.
