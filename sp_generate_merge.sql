@@ -37,7 +37,7 @@ BEGIN
 END
 GO
 
-CREATE PROC [sp_generate_merge]
+create PROC [sp_generate_merge]
 (
  @table_name nvarchar(776), -- The table/view for which the MERGE statement will be generated using the existing data. This parameter accepts unquoted single-part identifiers only (e.g. MyTable)
  @target_table nvarchar(776) = NULL, -- Use this parameter to specify a different table name into which the data will be inserted/updated/deleted. This parameter accepts unquoted single-part identifiers (e.g. MyTable) or quoted multi-part identifiers (e.g. [OtherDb].[dbo].[MyTable])
@@ -776,7 +776,7 @@ BEGIN
   ELSE IF @scd_type = 2
   BEGIN
     --SCD Type 2: Only update expiry date for expired records (current indicator set to 0)
-    SET @Column_List_For_Update = @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_current) + ' = 0,' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_expiry) + ' = @asof'
+    SET @Column_List_For_Update = @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_current) + ' = ''N'',' + @b COLLATE DATABASE_DEFAULT + '  [Target].' + QUOTENAME(@meta_expiry) + ' = @asof'
   END
 END
 
@@ -1031,22 +1031,22 @@ BEGIN
     IF @top IS NULL OR @top < 0
     BEGIN
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT ' + @Business_Column_List + ','
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1 AS ' + QUOTENAME(@meta_current) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ''Y'' AS ' + QUOTENAME(@meta_current) + ','
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  @asof AS ' + QUOTENAME(@meta_effective) + ','
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)) AS ' + QUOTENAME(@meta_expiry) + ','
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_key_checksum) + ','
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_record_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +')), 2) AS ' + QUOTENAME(@meta_key_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +')), 2) AS ' + QUOTENAME(@meta_record_checksum) + ','
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source) + ' AS ' + QUOTENAME(@meta_source)
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
     END
     ELSE  --add 'TOP'-clause
     BEGIN
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT TOP ' + LTRIM(@top) + ' ' + @Business_Column_List + ','
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1 AS ' + QUOTENAME(@meta_current) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ''Y'' AS ' + QUOTENAME(@meta_current) + ','
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  @asof AS ' + QUOTENAME(@meta_effective) + ','
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)) AS ' + QUOTENAME(@meta_expiry) + ','
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_key_checksum) + ','
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2) AS ' + QUOTENAME(@meta_record_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +')), 2) AS ' + QUOTENAME(@meta_key_checksum) + ','
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +')), 2) AS ' + QUOTENAME(@meta_record_checksum) + ','
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source) + ' AS ' + QUOTENAME(@meta_source)
       SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
     END
@@ -1066,11 +1066,11 @@ BEGIN
   BEGIN
     IF @top IS NULL OR @top < 0
     BEGIN
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT ' + @Column_List COLLATE DATABASE_DEFAULT + ', HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare COLLATE DATABASE_DEFAULT,'],[','],''|'',['), ']),', ']),''|'',') +')) AS [' + @hash_compare_column COLLATE DATABASE_DEFAULT  + '] FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT ' + @Column_List COLLATE DATABASE_DEFAULT + ', HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@Column_List_For_HashCompare COLLATE DATABASE_DEFAULT,'],[','],''|'',['), ']),', ']),''|'',') +')) AS [' + @hash_compare_column COLLATE DATABASE_DEFAULT  + '] FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
     END
     ELSE  --add 'TOP'-clause
     BEGIN
-      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT TOP ' + LTRIM(@top) + ' ' + @Column_List COLLATE DATABASE_DEFAULT + ', HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare COLLATE DATABASE_DEFAULT,'],[','],''|'',['), ']),', ']),''|'',') +')) AS [' + @hash_compare_column COLLATE DATABASE_DEFAULT  + '] FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
+      SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'USING (SELECT TOP ' + LTRIM(@top) + ' ' + @Column_List COLLATE DATABASE_DEFAULT + ', HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@Column_List_For_HashCompare COLLATE DATABASE_DEFAULT,'],[','],''|'',['), ']),', ']),''|'',') +')) AS [' + @hash_compare_column COLLATE DATABASE_DEFAULT  + '] FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ') AS [Source]';
     END
   END
 END
@@ -1094,7 +1094,7 @@ BEGIN
   IF @scd_type > 0
   BEGIN
     --For SCD, use META_RECORD_CHECKSUM for change detection
-    SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHEN MATCHED AND [Target].' + QUOTENAME(@meta_current) + ' = 1 AND ([Target].' + QUOTENAME(@meta_record_checksum) + ' <> [Source].' + QUOTENAME(@meta_record_checksum) + ') THEN'
+    SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHEN MATCHED AND [Target].' + QUOTENAME(@meta_current) + ' = ''Y'' AND ([Target].' + QUOTENAME(@meta_record_checksum) + ' <> [Source].' + QUOTENAME(@meta_record_checksum) + ') THEN'
   END
   ELSE
   BEGIN
@@ -1157,14 +1157,14 @@ BEGIN
   
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'SELECT ' + @SelectCols + ','
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1, @asof, CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)),'
-  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
-  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +')), 2),'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''MD5'', CONCAT(''|'',' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +')), 2),'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  ' + QUOTENAME(@meta_source)
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'FROM ' + @Source_Table_For_Output COLLATE DATABASE_DEFAULT + ' s'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHERE EXISTS ('
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  SELECT 1 FROM ' + @Target_Table_For_Output + ' t'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  WHERE ' + REPLACE(REPLACE(@PK_column_joins, '[Target].', 't.'), '[Source].', 's.')
-  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_current) + ' = 0'
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_current) + ' = ''N'''
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '    AND t.' + QUOTENAME(@meta_expiry) + ' = @asof'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ');' + @b COLLATE DATABASE_DEFAULT
 END
