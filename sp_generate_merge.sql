@@ -730,11 +730,33 @@ END
 --Add META* columns for SCD functionality
 IF @scd_type > 0
 BEGIN
-  --Add META* columns to column lists
-  SET @Column_List += ',' + QUOTENAME(@meta_current) + ',' + QUOTENAME(@meta_effective) + ',' + QUOTENAME(@meta_expiry) + ',' + QUOTENAME(@meta_key_checksum) + ',' + QUOTENAME(@meta_record_checksum) + ',' + QUOTENAME(@meta_source)
+  --Add META* columns to column lists (only if not already present)
+  IF CHARINDEX(QUOTENAME(@meta_current), @Column_List) = 0
+    SET @Column_List += ',' + QUOTENAME(@meta_current)
+  IF CHARINDEX(QUOTENAME(@meta_effective), @Column_List) = 0
+    SET @Column_List += ',' + QUOTENAME(@meta_effective)
+  IF CHARINDEX(QUOTENAME(@meta_expiry), @Column_List) = 0
+    SET @Column_List += ',' + QUOTENAME(@meta_expiry)
+  IF CHARINDEX(QUOTENAME(@meta_key_checksum), @Column_List) = 0
+    SET @Column_List += ',' + QUOTENAME(@meta_key_checksum)
+  IF CHARINDEX(QUOTENAME(@meta_record_checksum), @Column_List) = 0
+    SET @Column_List += ',' + QUOTENAME(@meta_record_checksum)
+  IF CHARINDEX(QUOTENAME(@meta_source), @Column_List) = 0
+    SET @Column_List += ',' + QUOTENAME(@meta_source)
   
-  --Add META* columns to insert values (these will be computed in the MERGE)
-  SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_current) + ',[Source].' + QUOTENAME(@meta_effective) + ',[Source].' + QUOTENAME(@meta_expiry) + ',[Source].' + QUOTENAME(@meta_key_checksum) + ',[Source].' + QUOTENAME(@meta_record_checksum) + ',[Source].' + QUOTENAME(@meta_source)
+  --Add META* columns to insert values (these will be computed in the MERGE, only if not already present)
+  IF CHARINDEX(QUOTENAME(@meta_current), @Column_List_Insert_Values) = 0
+    SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_current)
+  IF CHARINDEX(QUOTENAME(@meta_effective), @Column_List_Insert_Values) = 0
+    SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_effective)
+  IF CHARINDEX(QUOTENAME(@meta_expiry), @Column_List_Insert_Values) = 0
+    SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_expiry)
+  IF CHARINDEX(QUOTENAME(@meta_key_checksum), @Column_List_Insert_Values) = 0
+    SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_key_checksum)
+  IF CHARINDEX(QUOTENAME(@meta_record_checksum), @Column_List_Insert_Values) = 0
+    SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_record_checksum)
+  IF CHARINDEX(QUOTENAME(@meta_source), @Column_List_Insert_Values) = 0
+    SET @Column_List_Insert_Values += ',[Source].' + QUOTENAME(@meta_source)
   
   --For SCD updates, we modify the update logic
   IF @scd_type = 1
@@ -1094,7 +1116,15 @@ END
 --When NOT matched by target, perform an INSERT------------------------------------
 SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'WHEN NOT MATCHED BY TARGET THEN';
 SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' INSERT(' + @Column_List COLLATE DATABASE_DEFAULT + ')'
-SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' VALUES(' + REPLACE(@Column_List_Insert_Values COLLATE DATABASE_DEFAULT, '[', '[Source].[') + ')'
+
+-- Sanitize-then-qualify approach: Strip existing qualifiers before applying [Source]. prefix
+-- This prevents repeated qualifiers like [Source].[Source] when columns are already qualified
+DECLARE @PayloadValues NVARCHAR(MAX) = @Column_List_Insert_Values COLLATE DATABASE_DEFAULT
+SET @PayloadValues = REPLACE(@PayloadValues, '[Target].[', '[')
+SET @PayloadValues = REPLACE(@PayloadValues, '[Source].[', '[')
+SET @PayloadValues = REPLACE(@PayloadValues, '[', '[Source].[')
+
+SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' VALUES(' + @PayloadValues + ')'
 
 
 --When NOT matched by source, DELETE the row as required
@@ -1114,7 +1144,16 @@ IF @scd_type = 2
 BEGIN
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + @b COLLATE DATABASE_DEFAULT + '--SCD Type 2: Insert new records for changed data'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'INSERT INTO ' + @Target_Table_For_Output COLLATE DATABASE_DEFAULT + ' (' + @Column_List COLLATE DATABASE_DEFAULT + ')'
-  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'SELECT ' + @Business_Column_List_Insert_Values + ','
+  
+  -- Sanitize-then-qualify approach: Strip existing qualifiers before applying [S]. prefix for alias S
+  -- This prevents repeated qualifiers in the SELECT list
+  DECLARE @SelectCols NVARCHAR(MAX) = @Business_Column_List_Insert_Values
+  SET @SelectCols = REPLACE(@SelectCols, '[S].[', '[')
+  SET @SelectCols = REPLACE(@SelectCols, '[Source].[', '[')
+  SET @SelectCols = REPLACE(@SelectCols, '[Target].[', '[')
+  SET @SelectCols = REPLACE(@SelectCols, '[', '[S].[')
+  
+  SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + 'SELECT ' + @SelectCols + ','
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  1, @asof, CAST(''9999-12-31 23:59:59.9999999'' AS datetime2(7)),'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@PK_column_list_for_key_checksum,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
   SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + '  CONVERT(varchar(64), HASHBYTES(''SHA2_256'', CONCAT(' + REPLACE(REPLACE(@Column_List_For_HashCompare,'],[','],''|'',['), ']),', ']),''|'',') +'), 2),'
