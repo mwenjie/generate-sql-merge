@@ -459,7 +459,9 @@ DECLARE @Column_ID int,
  @b char(1) = char(13),
  @PK_column_list_for_key_checksum nvarchar(max), -- For computing META_KEY_CHECKSUM from business keys
  @Business_Column_List nvarchar(max), -- Business columns only (excluding META*)
- @Business_Column_List_Insert_Values nvarchar(max) -- Business column insert values
+ @Business_Column_List_Insert_Values nvarchar(max), -- Business column insert values
+ @PayloadValues nvarchar(max), -- Sanitized values for NOT MATCHED BY TARGET
+ @SelectCols nvarchar(max) -- Sanitized columns for SCD Type 2 INSERT SELECT
 
 IF @hash_compare_column IS NOT NULL  --Check existence of column [Hashvalue] in target table and raise error in case of missing
 BEGIN
@@ -1119,7 +1121,7 @@ SET @outputMergeBatch += @b COLLATE DATABASE_DEFAULT + ' INSERT(' + @Column_List
 
 -- Sanitize-then-qualify approach: Strip existing qualifiers before applying [Source]. prefix
 -- This prevents repeated qualifiers like [Source].[Source] when columns are already qualified
-DECLARE @PayloadValues NVARCHAR(MAX) = @Column_List_Insert_Values COLLATE DATABASE_DEFAULT
+SET @PayloadValues = @Column_List_Insert_Values COLLATE DATABASE_DEFAULT
 SET @PayloadValues = REPLACE(@PayloadValues, '[Target].[', '[')
 SET @PayloadValues = REPLACE(@PayloadValues, '[Source].[', '[')
 SET @PayloadValues = REPLACE(@PayloadValues, '[', '[Source].[')
@@ -1147,7 +1149,7 @@ BEGIN
   
   -- Sanitize-then-qualify approach: Strip existing qualifiers before applying [S]. prefix for alias S
   -- This prevents repeated qualifiers in the SELECT list
-  DECLARE @SelectCols NVARCHAR(MAX) = @Business_Column_List_Insert_Values
+  SET @SelectCols = @Business_Column_List_Insert_Values
   SET @SelectCols = REPLACE(@SelectCols, '[S].[', '[')
   SET @SelectCols = REPLACE(@SelectCols, '[Source].[', '[')
   SET @SelectCols = REPLACE(@SelectCols, '[Target].[', '[')
